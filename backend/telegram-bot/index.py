@@ -9,8 +9,10 @@ import json
 import os
 import psycopg2
 import requests
+import re
 from typing import Dict, Any, Optional
 from datetime import datetime
+from difflib import SequenceMatcher
 
 def get_db_connection():
     """Подключение к PostgreSQL"""
@@ -127,17 +129,65 @@ def update_user_learning(user_id: int, category: str, data: Dict[str, Any]) -> N
     cur.close()
     conn.close()
 
-def generate_ai_response(user_message: str, history: list) -> str:
+HARMFUL_PATTERNS = [
+    r'\b(убий|убить|смерть|насилие|терроризм)\b',
+    r'\b(наркотик|кокаин|героин|мет)\b',
+    r'\b(порн|секс|xxx|эротик)\b',
+    r'\b(нацис|фашис|расизм|геноцид)\b',
+]
+
+def is_safe_content(text: str) -> bool:
+    """Проверка контента на безопасность"""
+    text_lower = text.lower()
+    for pattern in HARMFUL_PATTERNS:
+        if re.search(pattern, text_lower):
+            return False
+    return True
+
+def fuzzy_match(text: str, target: str, threshold: float = 0.75) -> bool:
+    """Нечеткое сравнение строк для распознавания опечаток"""
+    return SequenceMatcher(None, text.lower(), target.lower()).ratio() > threshold
+
+def is_bot_mentioned(text: str, chat_type: str) -> bool:
+    """Проверка упоминания бота в группе"""
+    if chat_type == 'private':
+        return True
+    
+    text_lower = text.lower()
+    keywords = ['nonillionai', 'нониллион', 'нонилион', 'nonillion']
+    
+    for keyword in keywords:
+        if keyword in text_lower:
+            return True
+        for word in text_lower.split():
+            if fuzzy_match(word, keyword, 0.7):
+                return True
+    
+    return False
+
+def generate_ai_response(user_message: str, history: list, user_name: str = '') -> str:
     """Генерация ответа ИИ на основе контекста"""
     message_lower = user_message.lower()
     
-    if 'привет' in message_lower or 'start' in message_lower:
-        return 'Привет! 👋 Я AI-ассистент. Умею генерировать изображения по описанию!'
+    if not is_safe_content(user_message):
+        return '❌ Извините, я не могу обработать такой запрос. Давайте обсудим что-то позитивное!'
     
-    if 'нарисуй' in message_lower or 'изображение' in message_lower or 'картинк' in message_lower:
+    if 'кто ты' in message_lower or 'представься' in message_lower:
+        return '👋 Привет! Я **NonillionAI** — искусственный интеллект, созданный cat (@whimsical_cat). Я умею генерировать изображения, отвечать на вопросы и помогать с творческими задачами!'
+    
+    if 'привет' in message_lower or 'start' in message_lower or 'здравствуй' in message_lower:
+        return f'Привет, {user_name}! 👋 Я **NonillionAI**, созданный cat (@whimsical_cat). Умею генерировать изображения по описанию! Просто скажи "нарисуй" и опиши, что хочешь увидеть.'
+    
+    if 'нарисуй' in message_lower or 'изображение' in message_lower or 'картинк' in message_lower or 'сгенерируй' in message_lower:
+        prompt = re.sub(r'(нарисуй|изображение|картинку|сгенерируй)', '', message_lower, flags=re.IGNORECASE).strip()
+        if len(prompt) < 3:
+            return '🎨 Опишите, что вы хотите увидеть на изображении! Например: "нарисуй закат над океаном"'
         return 'generate_image'
     
-    return 'Привет! Я умею генерировать изображения. Напиши "нарисуй" и опиши что хочешь увидеть!'
+    if 'спасибо' in message_lower or 'благодарю' in message_lower:
+        return 'Рад помочь! 😊 Обращайтесь, если нужна еще помощь!'
+    
+    return 'Я **NonillionAI**, созданный cat (@whimsical_cat). Умею генерировать изображения — просто напишите "нарисуй" и опишите что хотите!'
 
 def send_telegram_message(chat_id: int, text: str, photo_url: str = None) -> None:
     """Отправить сообщение в Telegram"""
@@ -161,10 +211,26 @@ def send_telegram_message(chat_id: int, text: str, photo_url: str = None) -> Non
     
     requests.post(url, json=data)
 
-def generate_image(prompt: str, user_id: int, conversation_id: int) -> Optional[str]:
+def generate_image(prompt: str, user_id: int, conversation_id: int, chat_id: int) -> Optional[str]:
     """Генерация изображения через FLUX"""
+    if not is_safe_content(prompt):
+        send_telegram_message(chat_id, '❌ Извините, не могу сгенерировать такое изображение.')
+        return None
+    
     conn = get_db_connection()
     cur = conn.cursor()
+    
+    cur.execute("""
+        SELECT id FROM generated_images 
+        WHERE user_id = %s AND prompt = %s AND status = 'processing'
+        AND created_at > NOW() - INTERVAL '1 minute'
+    """, (user_id, prompt))
+    
+    existing = cur.fetchone()
+    if existing:
+        cur.close()
+        conn.close()
+        return None
     
     cur.execute("""
         INSERT INTO generated_images (user_id, conversation_id, prompt, status, created_at)
@@ -176,9 +242,20 @@ def generate_image(prompt: str, user_id: int, conversation_id: int) -> Optional[
     conn.commit()
     
     try:
-        # Здесь будет вызов вашего API для генерации
-        # Пока заглушка
-        image_url = f'https://placeholder.com/image_{image_id}.jpg'
+        flux_api_key = os.environ.get('FLUX_API_KEY')
+        if not flux_api_key:
+            image_url = f'https://via.placeholder.com/1024x1024.png?text=Image+{image_id}'
+        else:
+            response = requests.post(
+                'https://api.flux.ai/v1/generate',
+                json={'prompt': prompt, 'width': 1024, 'height': 1024},
+                headers={'Authorization': f'Bearer {flux_api_key}'},
+                timeout=30
+            )
+            if response.status_code == 200:
+                image_url = response.json().get('url')
+            else:
+                image_url = f'https://via.placeholder.com/1024x1024.png?text=Error'
         
         cur.execute("""
             UPDATE generated_images 
@@ -242,6 +319,8 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         user = message.get('from', {})
         chat = message.get('chat', {})
         text = message.get('text', '')
+        chat_type = chat.get('type', 'private')
+        chat_id = chat.get('id')
         
         if not user or not text:
             return {
@@ -251,7 +330,16 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 'isBase64Encoded': False
             }
         
+        if not is_bot_mentioned(text, chat_type):
+            return {
+                'statusCode': 200,
+                'headers': {'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*'},
+                'body': json.dumps({'ok': True}),
+                'isBase64Encoded': False
+            }
+        
         telegram_id = user.get('id')
+        user_name = user.get('first_name', 'друг')
         
         save_user(user)
         
@@ -261,22 +349,30 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         
         history = get_conversation_history(conversation_id)
         
-        ai_response = generate_ai_response(text, history)
+        ai_response = generate_ai_response(text, history, user_name)
         
         if ai_response == 'generate_image':
-            chat_id = chat.get('id')
-            send_telegram_message(chat_id, '🎨 Генерирую изображение...')
+            prompt = re.sub(r'(нарисуй|изображение|картинку|сгенерируй|nonillionai|нониллион)', '', text, flags=re.IGNORECASE).strip()
             
-            image_url = generate_image(text, telegram_id, conversation_id)
+            if len(prompt) < 3:
+                send_telegram_message(chat_id, '🎨 Опишите, что вы хотите увидеть на изображении!')
+                return {
+                    'statusCode': 200,
+                    'headers': {'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*'},
+                    'body': json.dumps({'ok': True}),
+                    'isBase64Encoded': False
+                }
+            
+            send_telegram_message(chat_id, '🎨 Генерирую изображение, подождите немного...')
+            
+            image_url = generate_image(prompt, telegram_id, conversation_id, chat_id)
             
             if image_url:
-                send_telegram_message(chat_id, 'Готово! ✨', photo_url=image_url)
-                save_message(conversation_id, telegram_id, 'assistant', f'Сгенерировано изображение: {text}')
+                send_telegram_message(chat_id, f'✅ Готово! Вот изображение: "{prompt}"', image_url)
+                save_message(conversation_id, telegram_id, 'assistant', f'[Изображение: {prompt}]')
             else:
-                send_telegram_message(chat_id, 'Ошибка генерации изображения 😔')
-                save_message(conversation_id, telegram_id, 'assistant', 'Ошибка генерации')
+                save_message(conversation_id, telegram_id, 'assistant', '[Ошибка генерации]')
         else:
-            chat_id = chat.get('id')
             send_telegram_message(chat_id, ai_response)
             save_message(conversation_id, telegram_id, 'assistant', ai_response)
         
