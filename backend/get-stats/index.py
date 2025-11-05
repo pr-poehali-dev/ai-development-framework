@@ -45,7 +45,6 @@ def get_stats() -> Dict[str, Any]:
         'users': users_count,
         'messages': messages_count,
         'images': images_count,
-        'accuracy': 98.5,
         'recent': [
             {
                 'user': msg[1] or f'User {msg[0]}',

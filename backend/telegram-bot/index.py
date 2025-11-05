@@ -8,6 +8,7 @@ Returns: HTTP response for Telegram webhook
 import json
 import os
 import psycopg2
+import requests
 from typing import Dict, Any, Optional
 from datetime import datetime
 
@@ -128,30 +129,80 @@ def update_user_learning(user_id: int, category: str, data: Dict[str, Any]) -> N
 
 def generate_ai_response(user_message: str, history: list) -> str:
     """Генерация ответа ИИ на основе контекста"""
-    context_words = len(' '.join([m['content'] for m in history]).split())
-    
-    responses = {
-        'привет': 'Привет! 👋 Я AI-ассистент. Могу помочь с текстом, генерацией и редактированием изображений!',
-        'как дела': 'Отлично! 🚀 Готов помогать. Чем займёмся?',
-        'что умеешь': '🤖 Я умею:\n• Вести умные диалоги\n• Генерировать изображения\n• Редактировать фото\n• Запоминать контекст\n• Адаптироваться под тебя',
-        'нарисуй': '🎨 Функция генерации изображений активируется! Опиши подробнее, что хочешь увидеть.',
-        'редактируй': '✨ Редактор изображений готов! Загрузи фото и скажи, что изменить.',
-    }
-    
     message_lower = user_message.lower()
     
-    for keyword, response in responses.items():
-        if keyword in message_lower:
-            return response
+    if 'привет' in message_lower or 'start' in message_lower:
+        return 'Привет! 👋 Я AI-ассистент. Умею генерировать изображения по описанию!'
     
-    if context_words > 50:
-        return f'Понял тебя! 💡 (Контекст: {context_words} слов). Продолжаю обучаться под твой стиль общения.'
+    if 'нарисуй' in message_lower or 'изображение' in message_lower or 'картинк' in message_lower:
+        return 'generate_image'
     
-    return f'Интересно! 🧠 Обрабатываю: "{user_message[:50]}..." (История: {len(history)} сообщений)'
+    return 'Привет! Я умею генерировать изображения. Напиши "нарисуй" и опиши что хочешь увидеть!'
 
-def send_telegram_message(chat_id: int, text: str) -> None:
-    """Отправить сообщение в Telegram (заглушка)"""
-    pass
+def send_telegram_message(chat_id: int, text: str, photo_url: str = None) -> None:
+    """Отправить сообщение в Telegram"""
+    bot_token = os.environ.get('TELEGRAM_BOT_TOKEN')
+    if not bot_token:
+        return
+    
+    if photo_url:
+        url = f'https://api.telegram.org/bot{bot_token}/sendPhoto'
+        data = {
+            'chat_id': chat_id,
+            'photo': photo_url,
+            'caption': text
+        }
+    else:
+        url = f'https://api.telegram.org/bot{bot_token}/sendMessage'
+        data = {
+            'chat_id': chat_id,
+            'text': text
+        }
+    
+    requests.post(url, json=data)
+
+def generate_image(prompt: str, user_id: int, conversation_id: int) -> Optional[str]:
+    """Генерация изображения через FLUX"""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    cur.execute("""
+        INSERT INTO generated_images (user_id, conversation_id, prompt, status, created_at)
+        VALUES (%s, %s, %s, %s, %s)
+        RETURNING id
+    """, (user_id, conversation_id, prompt, 'processing', datetime.now()))
+    
+    image_id = cur.fetchone()[0]
+    conn.commit()
+    
+    try:
+        # Здесь будет вызов вашего API для генерации
+        # Пока заглушка
+        image_url = f'https://placeholder.com/image_{image_id}.jpg'
+        
+        cur.execute("""
+            UPDATE generated_images 
+            SET status = %s, image_url = %s, completed_at = %s
+            WHERE id = %s
+        """, ('completed', image_url, datetime.now(), image_id))
+        
+        conn.commit()
+        cur.close()
+        conn.close()
+        
+        return image_url
+    except Exception as e:
+        cur.execute("""
+            UPDATE generated_images 
+            SET status = %s, error_message = %s
+            WHERE id = %s
+        """, ('failed', str(e), image_id))
+        
+        conn.commit()
+        cur.close()
+        conn.close()
+        
+        return None
 
 def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     method = event.get('httpMethod', 'POST')
@@ -212,7 +263,22 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         
         ai_response = generate_ai_response(text, history)
         
-        save_message(conversation_id, telegram_id, 'assistant', ai_response)
+        if ai_response == 'generate_image':
+            chat_id = chat.get('id')
+            send_telegram_message(chat_id, '🎨 Генерирую изображение...')
+            
+            image_url = generate_image(text, telegram_id, conversation_id)
+            
+            if image_url:
+                send_telegram_message(chat_id, 'Готово! ✨', photo_url=image_url)
+                save_message(conversation_id, telegram_id, 'assistant', f'Сгенерировано изображение: {text}')
+            else:
+                send_telegram_message(chat_id, 'Ошибка генерации изображения 😔')
+                save_message(conversation_id, telegram_id, 'assistant', 'Ошибка генерации')
+        else:
+            chat_id = chat.get('id')
+            send_telegram_message(chat_id, ai_response)
+            save_message(conversation_id, telegram_id, 'assistant', ai_response)
         
         if len(history) > 5:
             learning_data = {
@@ -228,11 +294,7 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 'Content-Type': 'application/json',
                 'Access-Control-Allow-Origin': '*'
             },
-            'body': json.dumps({
-                'ok': True,
-                'message': ai_response,
-                'conversation_id': conversation_id
-            }),
+            'body': json.dumps({'ok': True}),
             'isBase64Encoded': False
         }
     
