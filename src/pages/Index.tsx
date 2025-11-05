@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
@@ -7,14 +7,54 @@ import Icon from '@/components/ui/icon';
 
 const Index = () => {
   const [activeSection, setActiveSection] = useState('chat');
-  const [botStatus, setBotStatus] = useState<'active' | 'inactive'>('active');
+  const [botStatus, setBotStatus] = useState<'active' | 'inactive'>('inactive');
+  const [isSettingWebhook, setIsSettingWebhook] = useState(false);
+  const [stats, setStats] = useState([
+    { label: 'Пользователей', value: '0', icon: 'Users', gradient: 'gradient-primary' },
+    { label: 'Сообщений', value: '0', icon: 'MessageSquare', gradient: 'gradient-secondary' },
+    { label: 'Изображений', value: '0', icon: 'Image', gradient: 'gradient-primary' },
+  ]);
 
-  const stats = [
-    { label: 'Пользователей', value: '1,234', icon: 'Users', gradient: 'gradient-primary' },
-    { label: 'Сообщений', value: '45.6K', icon: 'MessageSquare', gradient: 'gradient-secondary' },
-    { label: 'Изображений', value: '8,921', icon: 'Image', gradient: 'gradient-primary' },
-    { label: 'Точность', value: '98.5%', icon: 'Target', gradient: 'gradient-secondary' },
-  ];
+  useEffect(() => {
+    fetch('https://functions.poehali.dev/7f4566ee-c8a5-4bb3-9093-cf859563eb50')
+      .then(res => res.json())
+      .then(data => {
+        setStats([
+          { label: 'Пользователей', value: String(data.users), icon: 'Users', gradient: 'gradient-primary' },
+          { label: 'Сообщений', value: String(data.messages), icon: 'MessageSquare', gradient: 'gradient-secondary' },
+          { label: 'Изображений', value: String(data.images), icon: 'Image', gradient: 'gradient-primary' },
+        ]);
+      })
+      .catch(err => console.error('Ошибка загрузки статистики:', err));
+
+    fetch('https://functions.poehali.dev/9e4bd2c5-4e19-4c8c-bdb2-ebee71329b8c')
+      .then(res => res.json())
+      .then(data => {
+        if (data.result && data.result.url) {
+          setBotStatus('active');
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  const setupWebhook = async () => {
+    setIsSettingWebhook(true);
+    try {
+      const response = await fetch('https://functions.poehali.dev/9e4bd2c5-4e19-4c8c-bdb2-ebee71329b8c', {
+        method: 'POST'
+      });
+      const data = await response.json();
+      if (data.success) {
+        setBotStatus('active');
+        alert(`✅ Бот активирован!\n\nИмя: @${data.bot.username}\nID: ${data.bot.id}`);
+      } else {
+        alert(`❌ Ошибка: ${data.error}`);
+      }
+    } catch (err) {
+      alert('❌ Ошибка подключения');
+    }
+    setIsSettingWebhook(false);
+  };
 
   const sections = [
     { id: 'chat', label: 'Чат', icon: 'MessageCircle' },
@@ -25,11 +65,31 @@ const Index = () => {
     { id: 'settings', label: 'Настройки', icon: 'Settings' },
   ];
 
-  const recentChats = [
-    { user: 'Алексей К.', message: 'Нарисуй космический корабль', time: '2 мин назад', avatar: '👨‍🚀' },
-    { user: 'Мария С.', message: 'Редактируй фон на фото', time: '5 мин назад', avatar: '👩‍🎨' },
-    { user: 'Дмитрий В.', message: 'Расскажи про квантовую физику', time: '12 мин назад', avatar: '🧑‍🔬' },
-  ];
+  const [recentChats, setRecentChats] = useState<any[]>([]);
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      fetch('https://functions.poehali.dev/7f4566ee-c8a5-4bb3-9093-cf859563eb50')
+        .then(res => res.json())
+        .then(data => {
+          setStats([
+            { label: 'Пользователей', value: String(data.users), icon: 'Users', gradient: 'gradient-primary' },
+            { label: 'Сообщений', value: String(data.messages), icon: 'MessageSquare', gradient: 'gradient-secondary' },
+            { label: 'Изображений', value: String(data.images), icon: 'Image', gradient: 'gradient-primary' },
+          ]);
+          if (data.recent) {
+            setRecentChats(data.recent.map((msg: any) => ({
+              user: msg.user,
+              message: msg.message,
+              time: new Date(msg.time).toLocaleString('ru-RU'),
+              avatar: '👤'
+            })));
+          }
+        })
+        .catch(() => {});
+    }, 5000);
+    return () => clearInterval(interval);
+  }, []);
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-purple-50 via-blue-50 to-pink-50">
@@ -54,11 +114,12 @@ const Index = () => {
                 {botStatus === 'active' ? 'Активен' : 'Неактивен'}
               </Badge>
               <Button 
-                onClick={() => setBotStatus(botStatus === 'active' ? 'inactive' : 'active')}
-                className="gradient-secondary shadow-lg hover:shadow-xl transition-all"
+                onClick={setupWebhook}
+                disabled={botStatus === 'active' || isSettingWebhook}
+                className="gradient-secondary shadow-lg hover:shadow-xl transition-all disabled:opacity-50"
               >
                 <Icon name="Power" size={18} className="mr-2" />
-                {botStatus === 'active' ? 'Остановить' : 'Запустить'}
+                {isSettingWebhook ? 'Подключение...' : botStatus === 'active' ? 'Активен' : 'Активировать бота'}
               </Button>
             </div>
           </div>
@@ -110,7 +171,12 @@ const Index = () => {
                       Новый чат
                     </Button>
                   </div>
-                  {recentChats.map((chat, index) => (
+                  {recentChats.length === 0 ? (
+                    <div className="text-center py-12 text-muted-foreground">
+                      <Icon name="MessageCircle" size={48} className="mx-auto mb-4 opacity-20" />
+                      <p>Диалогов пока нет</p>
+                    </div>
+                  ) : recentChats.map((chat, index) => (
                     <div 
                       key={index}
                       className="p-4 rounded-2xl border border-purple-100 hover:border-purple-300 hover:shadow-md transition-all cursor-pointer bg-gradient-to-r from-white to-purple-50/30"
